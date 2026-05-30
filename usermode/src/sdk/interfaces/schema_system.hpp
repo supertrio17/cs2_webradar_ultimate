@@ -48,16 +48,16 @@ public:
     std::vector<c_schema_system_type_scope*> get_type_scopes() const
     {
         const auto size = m_memory->read_t<uint32_t>(reinterpret_cast<uintptr_t>(this) + 0x190);
-        if (!size || size >= 50)
+        if (!size || size > 512)
         {
-            LOG_ERROR("type scope size is either empty or not good");
+            LOG_WARNING("type scope size is either empty or not good");
             return {};
         }
 
         const auto data = m_memory->read_t<uintptr_t>(reinterpret_cast<uintptr_t>(this) + 0x198);
         if (!data || data <= 0x10000)
         {
-            LOG_ERROR("type scope data is either empty or not good");
+            LOG_WARNING("type scope data is either empty or not good");
             return {};
         }
 
@@ -66,7 +66,7 @@ public:
 
         if (!m_memory->read_t(data, type_scopes.data(), size * sizeof(uintptr_t)))
         {
-            LOG_ERROR("failed to read type scopes");
+            LOG_WARNING("failed to read type scopes");
             return {};
         }
 
