@@ -6,9 +6,10 @@ class c_global_vars;
 
 namespace i
 {
-	bool setup();
+    bool setup();
+    bool refresh_global_vars();
 
-	inline c_schema_system* m_schema_system = nullptr;
-	inline c_game_entity_system* m_game_entity_system = nullptr;
-	inline c_global_vars* m_global_vars = nullptr;
+    inline c_schema_system* m_schema_system = nullptr;
+    inline c_game_entity_system* m_game_entity_system = nullptr;
+    inline c_global_vars* m_global_vars = nullptr;
 }

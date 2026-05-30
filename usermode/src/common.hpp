@@ -14,6 +14,15 @@
 #define GET_GLOBAL_VARS "48 89 15 ? ? ? ? 48 89 42"
 #define GET_LOCAL_PLAYER_CONTROLLER "48 8B 05 ? ? ? ? 41 89 BE"
 
+/* cs2-dumper offsets from dump folder (2026-05-29) */
+namespace offsets
+{
+    inline constexpr uintptr_t m_dw_entity_list = 0x24E5590;
+    inline constexpr uintptr_t m_dw_global_vars = 0x205F6D0;
+    inline constexpr uintptr_t m_dw_local_player_controller = 0x231E700;
+    inline constexpr uintptr_t m_schema_system = 0x76800;
+}
+
 /* custom defines */
 #define LOG_INFO(str, ...) \
     { \
