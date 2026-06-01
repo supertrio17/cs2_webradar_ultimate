@@ -12,7 +12,7 @@
         auto process_id = this->get_process_id("cs2.exe");
         if (!process_id.has_value()) {
             LOG_DEBUG("memory::setup waiting for cs2.exe process");
-            LOG_WARNING("No CS2.exe process.")
+            LOG_WARNING("No CS2.exe process.");
             return 2;
         }
 
@@ -22,11 +22,11 @@
         auto handle = this->hijack_handle();
         if (!handle.has_value()) {
             this->m_handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, false, this->m_id);
-            LOG_WARNING("Failed to hijack handle, using classic method instead.")
+            LOG_WARNING("Failed to hijack handle, using classic method instead.");
         }
         else {
-            LOG_INFO("Successfully hijacked handle.")
-                this->m_handle = handle.value();
+            LOG_INFO("Successfully hijacked handle.");
+            this->m_handle = handle.value();
         }
 
         LOG_DEBUG("memory::setup completed (handle='%p')", this->m_handle);
