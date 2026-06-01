@@ -23,6 +23,7 @@ void LogMessage(const std::string& msg, int type = 1) {
 
 DWORD WINAPI AppLogic(LPVOID) {
     LOG_CLEAR();
+    LOG_DEBUG("AppLogic thread started");
 
     if (!utils::is_updated()) {
         LogMessage("Radar is not updated! Check LOG for more info.", 3);
@@ -36,19 +37,27 @@ DWORD WINAPI AppLogic(LPVOID) {
     if (cfgResult != 0) {
         const char* errs[] = { "", "Couldn't open config.json.", "Failed to parse config.json.", "Failed to deserialize config.json." };
         LogMessage(errs[cfgResult], 3);
+        LOG_ERROR("config setup failed with code '%d'", cfgResult);
         return 0;
     }
     LogMessage("Config system initialization completed.");
+    LOG_DEBUG("config loaded (use_localhost='%u', local_ip='%s', public_ip='%s')",
+        config.m_use_localhost ? 1 : 0,
+        config.m_local_ip.c_str(),
+        config.m_public_ip.c_str());
 
-    if (!exc::setup()) { LogMessage("Exception setup failed!", 3); return 0; }
+    if (!exc::setup()) { LogMessage("Exception setup failed!", 3); LOG_ERROR("exception setup failed"); return 0; }
     LogMessage("Exception handler initialized.");
+    LOG_DEBUG("exception handlers initialized");
 
     int memStatus;
     bool waitingLog = true;
     do {
         memStatus = m_memory->setup();
-        if (memStatus == 1) { LogMessage("Anti-cheat detected. Disable it.", 3); return 0; }
-        if (memStatus == 3) { LogMessage("Memory init failed.", 3); return 0; }
+        LOG_DEBUG("memory setup status='%d'", memStatus);
+
+        if (memStatus == 1) { LogMessage("Anti-cheat detected. Disable it.", 3); LOG_ERROR("aborting because anti-cheat process was detected"); return 0; }
+        if (memStatus == 3) { LogMessage("Memory init failed.", 3); LOG_ERROR("aborting because memory initialization failed"); return 0; }
         if (memStatus == 2) {
             if (waitingLog) {
                 LogMessage("Waiting for CS2.exe...");
@@ -62,7 +71,11 @@ DWORD WINAPI AppLogic(LPVOID) {
     LogMessage("Memory initialization completed.");
 
     waitingLog = true;
+    uint32_t interface_attempts = 0;
     while (!i::setup()) {
+        interface_attempts++;
+        LOG_DEBUG("interfaces setup attempt '%u' failed", interface_attempts);
+
         if (waitingLog) {
             LogMessage("Waiting for game load...");
             waitingLog = false;
@@ -70,28 +83,39 @@ DWORD WINAPI AppLogic(LPVOID) {
         std::this_thread::sleep_for(std::chrono::seconds(3));
     }
     LogMessage("Game loaded.");
+    LOG_DEBUG("interfaces setup completed after '%u' attempts", interface_attempts + 1);
 
-    if (!schema::setup()) { LogMessage("Schema setup failed!", 3); return 0; }
+    if (!schema::setup()) { LogMessage("Schema setup failed!", 3); LOG_ERROR("schema::setup returned false"); return 0; }
     LogMessage("Schema initialized.");
 
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        LOG_ERROR("WSAStartup failed");
+        return 0;
+    }
 
     auto ipv4 = utils::get_ipv4_address(config);
     if (ipv4.empty()) {
         ipv4 = config.m_local_ip;
         LogMessage(std::format("Failed to get auto-IP. Using config IP: '{}'", ipv4), 2);
+        LOG_WARNING("auto IPv4 resolution failed, using config local ip '%s'", ipv4.c_str());
     }
 
     std::string url = std::format("ws://{}:22006/cs2_webradar", ipv4);
+    LOG_DEBUG("connecting websocket to '%s'", url.c_str());
+
     auto ws = easywsclient::WebSocket::from_url(url);
+    uint32_t websocket_attempts = 1;
 
     while (!ws) {
         LogMessage(std::format("Connection failed ({}), retrying...", url), 3);
+        LOG_WARNING("websocket connection attempt '%u' failed ('%s')", websocket_attempts, url.c_str());
         ws = easywsclient::WebSocket::from_url(url);
+        websocket_attempts++;
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     LogMessage("Connected to websocket.");
+    LOG_DEBUG("websocket connection established after '%u' attempts", websocket_attempts);
 
     auto start = std::chrono::system_clock::now();
     bool in_match = false;
