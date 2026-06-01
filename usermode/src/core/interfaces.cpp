@@ -248,15 +248,22 @@ bool i::setup()
 
     if (m_schema_system)
     {
-        const auto type_scopes = m_schema_system->get_type_scopes(true, false);
-        if (type_scopes.empty())
+        const auto named_type_scopes = m_schema_system->get_type_scopes(true, false);
+        if (!named_type_scopes.empty())
         {
-            LOG_DEBUG("interfaces::setup schema system pointer was valid but type scopes are not ready yet");
-            m_schema_system = nullptr;
+            LOG_DEBUG("interfaces::setup schema system type scopes resolved ('%u' named scopes)", static_cast<uint32_t>(named_type_scopes.size()));
         }
         else
         {
-            LOG_DEBUG("interfaces::setup schema system type scopes resolved ('%u' scopes)", static_cast<uint32_t>(type_scopes.size()));
+            const auto raw_type_scopes = m_schema_system->get_type_scopes(false, false);
+            if (!raw_type_scopes.empty())
+            {
+                LOG_WARNING("interfaces::setup schema system scopes are present but unnamed ('%u' raw scopes), continuing", static_cast<uint32_t>(raw_type_scopes.size()));
+            }
+            else
+            {
+                LOG_WARNING("interfaces::setup schema system pointer was valid but type scopes are unavailable, continuing with dump/fallback schema data");
+            }
         }
     }
     else
