@@ -178,67 +178,84 @@ public:
         static uint32_t type_scope_second_offset = 0x198;
         static bool type_scope_data_at_first_offset = false;
 
-        auto read_type_scopes = [this](const uint32_t first_offset, const uint32_t second_offset, const bool data_at_first_offset, const bool require_named_scope, const bool emit_debug_logs) -> std::vector<c_schema_system_type_scope*>
+        uint32_t rejected_candidates = 0;
+        uint32_t logged_rejections = 0;
+        static constexpr uint32_t max_rejection_logs = 32;
+
+        auto read_type_scopes = [this, &rejected_candidates, &logged_rejections](const uint32_t first_offset, const uint32_t second_offset, const bool data_at_first_offset, const bool require_named_scope, const bool emit_debug_logs) -> std::vector<c_schema_system_type_scope*>
         {
-            const auto base = reinterpret_cast<uintptr_t>(this);
-            const auto size = data_at_first_offset ? m_memory->read_t<uint32_t>(base + second_offset) : m_memory->read_t<uint32_t>(base + first_offset);
-            if (!size || size > 2048)
+            const auto log_rejection = [&](const char* format, auto... args)
             {
-                if (emit_debug_logs)
-                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (invalid size '%u')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", size);
+                if (!emit_debug_logs)
+                    return;
 
-                return {};
-            }
+                rejected_candidates++;
+                if (logged_rejections >= max_rejection_logs)
+                    return;
 
-            const auto data = data_at_first_offset ? m_memory->read_t<uintptr_t>(base + first_offset) : m_memory->read_t<uintptr_t>(base + second_offset);
+                LOG_DEBUG(format, args...);
+                logged_rejections++;
+            };
+
+            const auto base = reinterpret_cast<uintptr_t>(this);
+            const auto data_offset = data_at_first_offset ? first_offset : second_offset;
+            const auto size_offset = data_at_first_offset ? second_offset : first_offset;
+
+            const auto data = m_memory->read_t<uintptr_t>(base + data_offset);
             if (!schema_detail::is_probable_pointer(data))
             {
-                if (emit_debug_logs)
-                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (invalid data ptr '0x%llX')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", static_cast<unsigned long long>(data));
-
+                log_rejection("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (invalid data ptr '0x%llX')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", static_cast<unsigned long long>(data));
                 return {};
             }
 
-            std::vector<c_schema_system_type_scope*> type_scopes(size);
-            m_memory->read_t(data, type_scopes.data(), size * sizeof(uintptr_t));
+            static constexpr std::array<uint32_t, 7> size_offset_deltas = { 0x0, 0x8, 0x10, 0x18, 0x20, 0x28, 0x30 };
 
-            std::vector<c_schema_system_type_scope*> valid_type_scopes = {};
-            valid_type_scopes.reserve(type_scopes.size());
-
-            for (const auto& type_scope : type_scopes)
+            for (const auto size_delta : size_offset_deltas)
             {
-                if (schema_detail::is_probable_pointer(reinterpret_cast<uintptr_t>(type_scope)))
-                    valid_type_scopes.push_back(type_scope);
-            }
+                const auto candidate_size_offset = size_offset + size_delta;
+                const auto size = m_memory->read_t<uint32_t>(base + candidate_size_offset);
+                if (!size || size > 2048)
+                    continue;
 
-            if (valid_type_scopes.empty())
-            {
+                std::vector<c_schema_system_type_scope*> type_scopes(size);
+                m_memory->read_t(data, type_scopes.data(), size * sizeof(uintptr_t));
+
+                std::vector<c_schema_system_type_scope*> valid_type_scopes = {};
+                valid_type_scopes.reserve(type_scopes.size());
+
+                for (const auto& type_scope : type_scopes)
+                {
+                    if (schema_detail::is_probable_pointer(reinterpret_cast<uintptr_t>(type_scope)))
+                        valid_type_scopes.push_back(type_scope);
+                }
+
+                if (valid_type_scopes.empty())
+                    continue;
+
+                const auto minimum_expected_valid_scopes = std::min<uint32_t>(size, 4);
+                if (valid_type_scopes.size() < minimum_expected_valid_scopes)
+                    continue;
+
+                size_t named_scope_count = 0;
+                const auto max_to_check = std::min<size_t>(valid_type_scopes.size(), 32);
+                for (size_t idx = 0; idx < max_to_check; ++idx)
+                {
+                    if (!valid_type_scopes[idx]->m_module_name().empty())
+                        named_scope_count++;
+                }
+
+                if (require_named_scope && !named_scope_count)
+                    continue;
+
                 if (emit_debug_logs)
-                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (no valid pointers from '%u' entries)", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", size);
+                    LOG_DEBUG("accepted type scope candidate first='0x%X' second='0x%X' order='%s' (size_offset='0x%X', size='%u', valid='%u', named='%u')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", candidate_size_offset, size, static_cast<uint32_t>(valid_type_scopes.size()), static_cast<uint32_t>(named_scope_count));
 
-                return {};
+                return valid_type_scopes;
             }
 
-            size_t named_scope_count = 0;
-            const auto max_to_check = std::min<size_t>(valid_type_scopes.size(), 32);
-            for (size_t idx = 0; idx < max_to_check; ++idx)
-            {
-                if (!valid_type_scopes[idx]->m_module_name().empty())
-                    named_scope_count++;
-            }
-
-            if (require_named_scope && !named_scope_count)
-            {
-                if (emit_debug_logs)
-                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (no named scopes in first '%u' entries)", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", static_cast<uint32_t>(max_to_check));
-
-                return {};
-            }
-
-            if (emit_debug_logs)
-                LOG_DEBUG("accepted type scope candidate first='0x%X' second='0x%X' order='%s' (size='%u', valid='%u', named='%u')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", size, static_cast<uint32_t>(valid_type_scopes.size()), static_cast<uint32_t>(named_scope_count));
-
-            return valid_type_scopes;
+            const auto original_size = m_memory->read_t<uint32_t>(base + size_offset);
+            log_rejection("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (invalid size '%u')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", original_size);
+            return {};
         };
 
         struct type_scope_layout_candidate_t
@@ -253,7 +270,7 @@ public:
             if (const auto scopes = read_type_scopes(type_scope_first_offset, type_scope_second_offset, type_scope_data_at_first_offset, require_named_scope, emit_debug_logs); !scopes.empty())
                 return scopes;
 
-            static constexpr std::array<type_scope_layout_candidate_t, 10> known_layouts = {
+            static constexpr std::array<type_scope_layout_candidate_t, 12> known_layouts = {
                 type_scope_layout_candidate_t{0x190, 0x198, false},
                 type_scope_layout_candidate_t{0x190, 0x198, true},
                 type_scope_layout_candidate_t{0x188, 0x190, false},
@@ -263,7 +280,9 @@ public:
                 type_scope_layout_candidate_t{0x180, 0x188, false},
                 type_scope_layout_candidate_t{0x180, 0x188, true},
                 type_scope_layout_candidate_t{0x198, 0x1A0, false},
-                type_scope_layout_candidate_t{0x198, 0x1A0, true}
+                type_scope_layout_candidate_t{0x198, 0x1A0, true},
+                type_scope_layout_candidate_t{0x190, 0x1A0, true},
+                type_scope_layout_candidate_t{0x188, 0x198, true}
             };
 
             for (const auto& candidate : known_layouts)
@@ -308,8 +327,17 @@ public:
 
         if (enable_debug_logging)
         {
+            rejected_candidates = 0;
+            logged_rejections = 0;
+
             LOG_WARNING("failed to resolve type scopes (cached first='0x%X' second='0x%X' order='%s', require_named_scope='%u')", type_scope_first_offset, type_scope_second_offset, type_scope_data_at_first_offset ? "data,size" : "size,data", require_named_scope ? 1 : 0);
-            return resolve_type_scopes(true);
+
+            auto scopes = resolve_type_scopes(true);
+
+            if (rejected_candidates > logged_rejections)
+                LOG_DEBUG("suppressed '%u' additional rejected type scope candidates", rejected_candidates - logged_rejections);
+
+            return scopes;
         }
 
         return {};
