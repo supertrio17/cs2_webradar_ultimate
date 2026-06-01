@@ -1,2 +1,28 @@
 kernelmode
 usermode/src/driver/driver.hpp
+
+# Visual Studio
+.vs/
+*.suo
+*.VC.db
+*.VC.opendb
+*.user
+
+# Build outputs
+release/
+debug/
+**/intermediates/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+
+# Runtime logs/cache
+WR_Log.txt
+dump/runtime_schema_cache.json
+runtime_schema_cache.json
+
+# Web dependencies/build
+webapp/node_modules/
+webapp/dist/

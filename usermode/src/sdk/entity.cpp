@@ -55,16 +55,16 @@ c_cs_player_controller* c_cs_player_controller::get_local_player_controller()
         if (!client_base.has_value() || !client_size.has_value())
             return static_cast<uintptr_t>(0);
 
-        const auto dumped_offset_address = client_base.value() + offsets::m_dw_local_player_controller;
+        const auto local_player_pattern = m_memory->find_pattern(CLIENT_DLL, GET_LOCAL_PLAYER_CONTROLLER);
+        if (local_player_pattern.has_value())
+            return local_player_pattern->rip().as<uintptr_t>();
+
+        const auto dumped_offset_address = client_base.value() + i::get_local_player_controller_offset();
         const auto dumped_offset_value = m_memory->read_t<uintptr_t>(dumped_offset_address);
-        if (dumped_offset_value)
+        if (dumped_offset_value > 0x10000)
             return dumped_offset_address;
 
-        const auto local_player_pattern = m_memory->find_pattern(CLIENT_DLL, GET_LOCAL_PLAYER_CONTROLLER);
-        if (!local_player_pattern.has_value())
-            return static_cast<uintptr_t>(0);
-
-        return reinterpret_cast<uintptr_t>(local_player_pattern->rip().as<void*>());
+        return static_cast<uintptr_t>(0);
     }();
 
     if (!local_player_controller_address)

@@ -10,6 +10,13 @@
 #include <set>
 #include <regex>
 #include <thread>
+#include <array>
+#include <optional>
+#include <filesystem>
+#include <unordered_map>
+#include <algorithm>
+#include <ranges>
+#include <format>
 #include <winternl.h>
 
 /* ext/includes */
