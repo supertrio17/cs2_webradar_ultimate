@@ -6,7 +6,7 @@ struct schema_data_t
     uint32_t m_offset = 0;
 };
 
-static std::vector<schema_data_t> m_schema_data = {};
+static std::unordered_map<fnv1a_t, uint32_t> m_schema_data = {};
 static constexpr std::array<schema_data_t, 41> m_schema_fallback_data = {
     schema_data_t{ fnv1a::hash_const("CBasePlayerController->m_hPawn"), 0x6BC },
     schema_data_t{ fnv1a::hash_const("CBasePlayerController->m_steamID"), 0x780 },
@@ -51,11 +51,243 @@ static constexpr std::array<schema_data_t, 41> m_schema_fallback_data = {
     schema_data_t{ fnv1a::hash_const("C_SmokeGrenadeProjectile->m_vSmokeDetonationPos"), 0x1268 },
 };
 
+namespace
+{
+    bool add_schema_entry(const fnv1a_t hash, const uint32_t offset, const bool overwrite = false)
+    {
+        if (!offset)
+            return false;
+
+        const auto it = m_schema_data.find(hash);
+        if (it != m_schema_data.end())
+        {
+            if (overwrite)
+                it->second = offset;
+
+            return false;
+        }
+
+        m_schema_data.emplace(hash, offset);
+        return true;
+    }
+
+    bool add_schema_entry(const schema_data_t& data, const bool overwrite = false)
+    {
+        return add_schema_entry(data.m_hashed_field_name, data.m_offset, overwrite);
+    }
+
+    std::optional<std::filesystem::path> get_executable_directory()
+    {
+        std::array<char, MAX_PATH> path_buffer = {};
+        const auto path_size = GetModuleFileNameA(nullptr, path_buffer.data(), static_cast<DWORD>(path_buffer.size()));
+        if (!path_size || path_size == path_buffer.size())
+            return {};
+
+        std::filesystem::path executable_path(path_buffer.data());
+        return executable_path.parent_path();
+    }
+
+    std::vector<std::filesystem::path> get_possible_dump_directories()
+    {
+        std::vector<std::filesystem::path> dump_directories = {};
+        std::set<std::filesystem::path> unique_dump_directories = {};
+
+        auto add_dump_dir = [&](const std::filesystem::path& base_path)
+        {
+            if (base_path.empty())
+                return;
+
+            for (uint32_t idx = 0; idx < 4; ++idx)
+            {
+                auto current = base_path;
+                for (uint32_t up = 0; up < idx; ++up)
+                    current = current.parent_path();
+
+                if (current.empty())
+                    continue;
+
+                const auto dump_path = current / "dump";
+                if (!unique_dump_directories.emplace(dump_path).second)
+                    continue;
+
+                dump_directories.emplace_back(dump_path);
+            }
+        };
+
+        add_dump_dir(std::filesystem::current_path());
+
+        if (const auto executable_directory = get_executable_directory(); executable_directory.has_value())
+            add_dump_dir(executable_directory.value());
+
+        return dump_directories;
+    }
+
+    std::optional<std::filesystem::path> find_dump_file(const std::string_view& file_name)
+    {
+        const auto dump_directories = get_possible_dump_directories();
+        for (const auto& dump_directory : dump_directories)
+        {
+            const auto file_path = dump_directory / file_name;
+            if (std::filesystem::exists(file_path))
+                return file_path;
+        }
+
+        return {};
+    }
+
+    std::filesystem::path get_runtime_cache_path()
+    {
+        if (const auto client_dump = find_dump_file("client_dll.json"); client_dump.has_value())
+            return client_dump.value().parent_path() / "runtime_schema_cache.json";
+
+        return std::filesystem::current_path() / "runtime_schema_cache.json";
+    }
+
+    bool read_json_file(const std::filesystem::path& path, nlohmann::json& output)
+    {
+        if (!std::filesystem::exists(path))
+            return false;
+
+        std::ifstream file(path);
+        if (!file.is_open())
+            return false;
+
+        try
+        {
+            output = nlohmann::json::parse(file);
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    uint32_t load_offsets_from_dump_file(const std::filesystem::path& file_path, const std::string_view& module_name)
+    {
+        nlohmann::json json_dump = {};
+        if (!read_json_file(file_path, json_dump))
+            return 0;
+
+        const std::string module_key(module_name);
+        if (!json_dump.contains(module_key))
+            return 0;
+
+        const auto& module = json_dump[module_key];
+        if (!module.contains("classes") || !module["classes"].is_object())
+            return 0;
+
+        uint32_t loaded = 0;
+
+        for (const auto& [class_name, class_data] : module["classes"].items())
+        {
+            if (!class_data.contains("fields") || !class_data["fields"].is_object())
+                continue;
+
+            for (const auto& [field_name, offset_data] : class_data["fields"].items())
+            {
+                if (!offset_data.is_number_integer() && !offset_data.is_number_unsigned())
+                    continue;
+
+                const auto field_offset = static_cast<uint32_t>(offset_data.get<uint64_t>());
+                if (!field_offset)
+                    continue;
+
+                const auto field_path = std::format("{}->{}", class_name, field_name);
+                if (add_schema_entry(fnv1a::hash(field_path), field_offset))
+                    loaded++;
+            }
+        }
+
+        return loaded;
+    }
+
+    uint32_t load_offsets_from_runtime_cache()
+    {
+        const auto runtime_cache_path = get_runtime_cache_path();
+
+        nlohmann::json json_cache = {};
+        if (!read_json_file(runtime_cache_path, json_cache))
+            return 0;
+
+        if (!json_cache.contains("entries") || !json_cache["entries"].is_array())
+            return 0;
+
+        uint32_t loaded = 0;
+
+        for (const auto& entry : json_cache["entries"])
+        {
+            if (!entry.contains("hash") || !entry.contains("offset"))
+                continue;
+
+            if ((!entry["hash"].is_number_integer() && !entry["hash"].is_number_unsigned()) ||
+                (!entry["offset"].is_number_integer() && !entry["offset"].is_number_unsigned()))
+                continue;
+
+            const auto hash = static_cast<fnv1a_t>(entry["hash"].get<uint64_t>());
+            const auto offset = static_cast<uint32_t>(entry["offset"].get<uint64_t>());
+            if (add_schema_entry(hash, offset))
+                loaded++;
+        }
+
+        return loaded;
+    }
+
+    void save_runtime_cache(const std::vector<schema_data_t>& entries)
+    {
+        if (entries.empty())
+            return;
+
+        const auto runtime_cache_path = get_runtime_cache_path();
+        const auto cache_directory = runtime_cache_path.parent_path();
+        if (!cache_directory.empty())
+            std::filesystem::create_directories(cache_directory);
+
+        nlohmann::json json_cache = {};
+        json_cache["entry_count"] = entries.size();
+        json_cache["entries"] = nlohmann::json::array();
+
+        for (const auto& entry : entries)
+        {
+            nlohmann::json json_entry = {};
+            json_entry["hash"] = entry.m_hashed_field_name;
+            json_entry["offset"] = entry.m_offset;
+            json_cache["entries"].push_back(std::move(json_entry));
+        }
+
+        std::ofstream cache_file(runtime_cache_path, std::ios::trunc);
+        if (!cache_file.is_open())
+            return;
+
+        cache_file << json_cache.dump(2);
+        cache_file.close();
+
+        const auto cache_path_string = runtime_cache_path.string();
+        LOG_INFO("saved '%d' runtime schema cache entries ('%s')", static_cast<int32_t>(entries.size()), cache_path_string.c_str());
+    }
+
+    uint32_t load_offsets_from_dump_files()
+    {
+        uint32_t loaded = 0;
+
+        if (const auto client_dump = find_dump_file("client_dll.json"); client_dump.has_value())
+            loaded += load_offsets_from_dump_file(client_dump.value(), CLIENT_DLL);
+
+        if (const auto engine_dump = find_dump_file("engine2_dll.json"); engine_dump.has_value())
+            loaded += load_offsets_from_dump_file(engine_dump.value(), ENGINE2_DLL);
+
+        return loaded;
+    }
+}
+
 bool schema::setup()
 {
     m_schema_data.clear();
 
+    std::vector<schema_data_t> runtime_entries = {};
     uint32_t found_classes = 0;
+
     if (i::m_schema_system)
     {
         const auto type_scopes = i::m_schema_system->get_type_scopes();
@@ -95,16 +327,21 @@ bool schema::setup()
                 found_classes++;
 
                 auto [schema_field_size, schema_field] = class_binding->get_fields();
-                for (uint32_t f_idx = 0; f_idx < schema_field_size; f_idx++)
+                for (uint32_t field_idx = 0; field_idx < schema_field_size; field_idx++)
                 {
                     if (!schema_field)
                         break;
 
                     const auto field_name = schema_field->m_name();
-                    if (!field_name.empty())
+                    const auto field_offset = schema_field->m_single_inheritance_offset();
+
+                    if (!field_name.empty() && field_offset)
                     {
-                        auto buff = format("{}->{}", class_name, field_name);
-                        m_schema_data.emplace_back(fnv1a::hash(buff), schema_field->m_single_inheritance_offset());
+                        const auto field_path = std::format("{}->{}", class_name, field_name);
+                        const schema_data_t runtime_data = { fnv1a::hash(field_path), field_offset };
+
+                        if (add_schema_entry(runtime_data, true))
+                            runtime_entries.emplace_back(runtime_data);
                     }
 
                     schema_field = reinterpret_cast<c_schema_class_field_data*>(reinterpret_cast<uintptr_t>(schema_field) + sizeof(c_schema_class_field_data));
@@ -113,38 +350,45 @@ bool schema::setup()
         }
     }
 
+    if (!runtime_entries.empty())
+        save_runtime_cache(runtime_entries);
+
+    const auto cached_offsets_loaded = load_offsets_from_runtime_cache();
+    const auto dump_offsets_loaded = load_offsets_from_dump_files();
+
+    if (cached_offsets_loaded)
+        LOG_INFO("loaded '%d' schema offsets from runtime cache", cached_offsets_loaded);
+
+    if (dump_offsets_loaded)
+        LOG_INFO("loaded '%d' schema offsets from dump files", dump_offsets_loaded);
+
     uint32_t fallback_added = 0;
     for (const auto& fallback_entry : m_schema_fallback_data)
     {
-        const auto exists = std::ranges::any_of(m_schema_data, [fallback_entry](const schema_data_t& data)
-        {
-            return data.m_hashed_field_name == fallback_entry.m_hashed_field_name;
-        });
-
-        if (exists)
-            continue;
-
-        m_schema_data.emplace_back(fallback_entry);
-        fallback_added++;
+        if (add_schema_entry(fallback_entry))
+            fallback_added++;
     }
 
     if (!found_classes)
-        LOG_WARNING("failed to load runtime schema classes, using fallback offsets");
+        LOG_WARNING("failed to load runtime schema classes, using cached and fallback offsets");
 
-    LOG_INFO("loaded '%d' schema classes and '%d' schema offsets ('%d' fallbacks)", found_classes, static_cast<int32_t>(m_schema_data.size()), fallback_added);
+    LOG_INFO("loaded '%d' schema classes and '%d' schema offsets ('%d' runtime, '%d' cached, '%d' dumped, '%d' fallbacks)",
+        found_classes,
+        static_cast<int32_t>(m_schema_data.size()),
+        static_cast<int32_t>(runtime_entries.size()),
+        cached_offsets_loaded,
+        dump_offsets_loaded,
+        fallback_added);
+
     return !m_schema_data.empty();
 }
 
 uint32_t schema::get_offset(const fnv1a_t hashed_field_name)
 {
-    if (const auto it = std::ranges::find_if(m_schema_data, [hashed_field_name](const schema_data_t& data)
-    {
-        return data.m_hashed_field_name == hashed_field_name;
-    });
+    const auto it = m_schema_data.find(hashed_field_name);
+    if (it != m_schema_data.end())
+        return it->second;
 
-    it != m_schema_data.end())
-        return it->m_offset;
-
-    LOG_ERROR("failed to find an offset for the field with the hash value '%d'", hashed_field_name);
+    LOG_ERROR("failed to find an offset for the field with the hash value '%llu'", static_cast<unsigned long long>(hashed_field_name));
     return {};
 }
