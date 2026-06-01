@@ -113,12 +113,19 @@ public:
         if (!module_name.empty())
             return module_name;
 
-        static constexpr std::array<uint32_t, 5> module_name_candidates = { 0x08, 0x10, 0x18, 0x20, 0x28 };
+        static constexpr std::array<uint32_t, 12> module_name_candidates = {
+            0x08, 0x10, 0x18, 0x20, 0x28, 0x30,
+            0x38, 0x40, 0x48, 0x50, 0x58, 0x60
+        };
+
         for (const auto candidate_offset : module_name_candidates)
         {
             module_name = read_module_name(candidate_offset);
             if (module_name.empty())
                 continue;
+
+            if (module_name_offset != candidate_offset)
+                LOG_DEBUG("resolved schema type scope module name offset to '0x%X'", candidate_offset);
 
             module_name_offset = candidate_offset;
             return module_name;
@@ -165,25 +172,37 @@ public:
 class c_schema_system
 {
 public:
-    std::vector<c_schema_system_type_scope*> get_type_scopes() const
+    std::vector<c_schema_system_type_scope*> get_type_scopes(const bool require_named_scope = true, const bool enable_debug_logging = true) const
     {
-        static uint32_t type_scope_size_offset = 0x190;
-        static uint32_t type_scope_data_offset = 0x198;
+        static uint32_t type_scope_first_offset = 0x190;
+        static uint32_t type_scope_second_offset = 0x198;
+        static bool type_scope_data_at_first_offset = false;
 
-        auto read_type_scopes = [this](const uint32_t size_offset, const uint32_t data_offset, const bool require_named_scope) -> std::vector<c_schema_system_type_scope*>
+        auto read_type_scopes = [this](const uint32_t first_offset, const uint32_t second_offset, const bool data_at_first_offset, const bool require_named_scope, const bool emit_debug_logs) -> std::vector<c_schema_system_type_scope*>
         {
-            const auto size = m_memory->read_t<uint32_t>(reinterpret_cast<uintptr_t>(this) + size_offset);
-            if (!size || size > 1024)
-                return {};
+            const auto base = reinterpret_cast<uintptr_t>(this);
+            const auto size = data_at_first_offset ? m_memory->read_t<uint32_t>(base + second_offset) : m_memory->read_t<uint32_t>(base + first_offset);
+            if (!size || size > 2048)
+            {
+                if (emit_debug_logs)
+                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (invalid size '%u')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", size);
 
-            const auto data = m_memory->read_t<uintptr_t>(reinterpret_cast<uintptr_t>(this) + data_offset);
-            if (!schema_detail::is_probable_pointer(data))
                 return {};
+            }
+
+            const auto data = data_at_first_offset ? m_memory->read_t<uintptr_t>(base + first_offset) : m_memory->read_t<uintptr_t>(base + second_offset);
+            if (!schema_detail::is_probable_pointer(data))
+            {
+                if (emit_debug_logs)
+                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (invalid data ptr '0x%llX')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", static_cast<unsigned long long>(data));
+
+                return {};
+            }
 
             std::vector<c_schema_system_type_scope*> type_scopes(size);
             m_memory->read_t(data, type_scopes.data(), size * sizeof(uintptr_t));
 
-            std::vector<c_schema_system_type_scope*> valid_type_scopes;
+            std::vector<c_schema_system_type_scope*> valid_type_scopes = {};
             valid_type_scopes.reserve(type_scopes.size());
 
             for (const auto& type_scope : type_scopes)
@@ -193,66 +212,112 @@ public:
             }
 
             if (valid_type_scopes.empty())
+            {
+                if (emit_debug_logs)
+                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (no valid pointers from '%u' entries)", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", size);
+
                 return {};
+            }
 
-            if (!require_named_scope)
-                return valid_type_scopes;
-
-            const auto max_to_check = std::min<size_t>(valid_type_scopes.size(), 12);
+            size_t named_scope_count = 0;
+            const auto max_to_check = std::min<size_t>(valid_type_scopes.size(), 32);
             for (size_t idx = 0; idx < max_to_check; ++idx)
             {
                 if (!valid_type_scopes[idx]->m_module_name().empty())
-                    return valid_type_scopes;
+                    named_scope_count++;
+            }
+
+            if (require_named_scope && !named_scope_count)
+            {
+                if (emit_debug_logs)
+                    LOG_DEBUG("rejected type scope candidate first='0x%X' second='0x%X' order='%s' (no named scopes in first '%u' entries)", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", static_cast<uint32_t>(max_to_check));
+
+                return {};
+            }
+
+            if (emit_debug_logs)
+                LOG_DEBUG("accepted type scope candidate first='0x%X' second='0x%X' order='%s' (size='%u', valid='%u', named='%u')", first_offset, second_offset, data_at_first_offset ? "data,size" : "size,data", size, static_cast<uint32_t>(valid_type_scopes.size()), static_cast<uint32_t>(named_scope_count));
+
+            return valid_type_scopes;
+        };
+
+        struct type_scope_layout_candidate_t
+        {
+            uint32_t m_first_offset = 0;
+            uint32_t m_second_offset = 0;
+            bool m_data_at_first_offset = false;
+        };
+
+        auto resolve_type_scopes = [&](const bool emit_debug_logs) -> std::vector<c_schema_system_type_scope*>
+        {
+            if (const auto scopes = read_type_scopes(type_scope_first_offset, type_scope_second_offset, type_scope_data_at_first_offset, require_named_scope, emit_debug_logs); !scopes.empty())
+                return scopes;
+
+            static constexpr std::array<type_scope_layout_candidate_t, 10> known_layouts = {
+                type_scope_layout_candidate_t{0x190, 0x198, false},
+                type_scope_layout_candidate_t{0x190, 0x198, true},
+                type_scope_layout_candidate_t{0x188, 0x190, false},
+                type_scope_layout_candidate_t{0x188, 0x190, true},
+                type_scope_layout_candidate_t{0x1A0, 0x1A8, false},
+                type_scope_layout_candidate_t{0x1A0, 0x1A8, true},
+                type_scope_layout_candidate_t{0x180, 0x188, false},
+                type_scope_layout_candidate_t{0x180, 0x188, true},
+                type_scope_layout_candidate_t{0x198, 0x1A0, false},
+                type_scope_layout_candidate_t{0x198, 0x1A0, true}
+            };
+
+            for (const auto& candidate : known_layouts)
+            {
+                if (candidate.m_first_offset == type_scope_first_offset && candidate.m_second_offset == type_scope_second_offset && candidate.m_data_at_first_offset == type_scope_data_at_first_offset)
+                    continue;
+
+                const auto scopes = read_type_scopes(candidate.m_first_offset, candidate.m_second_offset, candidate.m_data_at_first_offset, require_named_scope, emit_debug_logs);
+                if (scopes.empty())
+                    continue;
+
+                type_scope_first_offset = candidate.m_first_offset;
+                type_scope_second_offset = candidate.m_second_offset;
+                type_scope_data_at_first_offset = candidate.m_data_at_first_offset;
+
+                LOG_INFO("resolved dynamic type scope layout offsets first='0x%X' second='0x%X' order='%s'", type_scope_first_offset, type_scope_second_offset, type_scope_data_at_first_offset ? "data,size" : "size,data");
+                return scopes;
+            }
+
+            for (uint32_t offset = 0x140; offset <= 0x360; offset += 0x8)
+            {
+                for (const bool candidate_data_at_first_offset : { false, true })
+                {
+                    const auto scopes = read_type_scopes(offset, offset + 0x8, candidate_data_at_first_offset, require_named_scope, emit_debug_logs);
+                    if (scopes.empty())
+                        continue;
+
+                    type_scope_first_offset = offset;
+                    type_scope_second_offset = offset + 0x8;
+                    type_scope_data_at_first_offset = candidate_data_at_first_offset;
+
+                    LOG_INFO("resolved scanned type scope layout offsets first='0x%X' second='0x%X' order='%s'", type_scope_first_offset, type_scope_second_offset, type_scope_data_at_first_offset ? "data,size" : "size,data");
+                    return scopes;
+                }
             }
 
             return {};
         };
 
-        if (const auto scopes = read_type_scopes(type_scope_size_offset, type_scope_data_offset, true); !scopes.empty())
+        if (const auto scopes = resolve_type_scopes(false); !scopes.empty())
             return scopes;
 
-        static constexpr std::array<std::pair<uint32_t, uint32_t>, 5> known_layouts = {
-            std::pair{0x190, 0x198},
-            std::pair{0x188, 0x190},
-            std::pair{0x1A0, 0x1A8},
-            std::pair{0x180, 0x188},
-            std::pair{0x198, 0x1A0}
-        };
-
-        for (const auto& [candidate_size_offset, candidate_data_offset] : known_layouts)
+        if (enable_debug_logging)
         {
-            if (candidate_size_offset == type_scope_size_offset && candidate_data_offset == type_scope_data_offset)
-                continue;
-
-            const auto scopes = read_type_scopes(candidate_size_offset, candidate_data_offset, true);
-            if (scopes.empty())
-                continue;
-
-            type_scope_size_offset = candidate_size_offset;
-            type_scope_data_offset = candidate_data_offset;
-            LOG_INFO("resolved dynamic type scope layout offsets ('0x%X', '0x%X')", type_scope_size_offset, type_scope_data_offset);
-            return scopes;
+            LOG_WARNING("failed to resolve type scopes (cached first='0x%X' second='0x%X' order='%s', require_named_scope='%u')", type_scope_first_offset, type_scope_second_offset, type_scope_data_at_first_offset ? "data,size" : "size,data", require_named_scope ? 1 : 0);
+            return resolve_type_scopes(true);
         }
 
-        for (uint32_t offset = 0x150; offset <= 0x260; offset += 0x8)
-        {
-            const auto scopes = read_type_scopes(offset, offset + 0x8, true);
-            if (scopes.empty())
-                continue;
-
-            type_scope_size_offset = offset;
-            type_scope_data_offset = offset + 0x8;
-            LOG_INFO("resolved scanned type scope layout offsets ('0x%X', '0x%X')", type_scope_size_offset, type_scope_data_offset);
-            return scopes;
-        }
-
-        LOG_WARNING("type scope size is either empty or not good");
         return {};
     }
 
     class c_schema_system_type_scope* find_type_scope_for_module(const std::string_view& name) const
     {
-        const auto type_scopes = get_type_scopes();
+        const auto type_scopes = get_type_scopes(true, false);
         if (type_scopes.empty())
             return {};
 

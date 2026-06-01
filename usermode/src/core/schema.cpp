@@ -283,30 +283,58 @@ namespace
 
 bool schema::setup()
 {
+    LOG_DEBUG("schema::setup started");
     m_schema_data.clear();
 
     std::vector<schema_data_t> runtime_entries = {};
     uint32_t found_classes = 0;
+    uint32_t processed_scopes = 0;
+    uint32_t skipped_null_scopes = 0;
+    uint32_t skipped_unnamed_scopes = 0;
+    uint32_t skipped_non_target_scopes = 0;
+    uint32_t skipped_empty_hash_tables = 0;
 
     if (i::m_schema_system)
     {
-        const auto type_scopes = i::m_schema_system->get_type_scopes();
+        const auto type_scopes = i::m_schema_system->get_type_scopes(true, true);
+        LOG_DEBUG("schema::setup discovered '%u' schema type scopes", static_cast<uint32_t>(type_scopes.size()));
+
         for (const auto& type_scope : type_scopes)
         {
             if (!type_scope)
+            {
+                skipped_null_scopes++;
                 continue;
+            }
 
             const auto module_name = type_scope->m_module_name();
             if (module_name.empty())
+            {
+                skipped_unnamed_scopes++;
                 continue;
+            }
 
             if (module_name.find(CLIENT_DLL) == std::string::npos && module_name.find(ENGINE2_DLL) == std::string::npos)
+            {
+                skipped_non_target_scopes++;
                 continue;
+            }
+
+            processed_scopes++;
 
             auto hash_classes = type_scope->m_hash_classes();
             const auto table_size = hash_classes.size();
             if (!table_size)
+            {
+                skipped_empty_hash_tables++;
+                LOG_DEBUG("schema::setup skipped scope '%s' because class hash table is empty", module_name.c_str());
                 continue;
+            }
+
+            LOG_DEBUG("schema::setup reading scope '%s' with hash table size '%u'", module_name.c_str(), table_size);
+
+            uint32_t scope_classes = 0;
+            uint32_t scope_added_fields = 0;
 
             std::unique_ptr<uintptr_t[]> elements = std::make_unique_for_overwrite<uintptr_t[]>(table_size);
             const auto elements_size = hash_classes.get_elements(0, table_size, elements.get());
@@ -325,6 +353,7 @@ bool schema::setup()
                     continue;
 
                 found_classes++;
+                scope_classes++;
 
                 auto [schema_field_size, schema_field] = class_binding->get_fields();
                 for (uint32_t field_idx = 0; field_idx < schema_field_size; field_idx++)
@@ -341,14 +370,30 @@ bool schema::setup()
                         const schema_data_t runtime_data = { fnv1a::hash(field_path), field_offset };
 
                         if (add_schema_entry(runtime_data, true))
+                        {
                             runtime_entries.emplace_back(runtime_data);
+                            scope_added_fields++;
+                        }
                     }
 
                     schema_field = reinterpret_cast<c_schema_class_field_data*>(reinterpret_cast<uintptr_t>(schema_field) + sizeof(c_schema_class_field_data));
                 }
             }
+
+            LOG_DEBUG("schema::setup completed scope '%s' (classes='%u', added_fields='%u')", module_name.c_str(), scope_classes, scope_added_fields);
         }
     }
+    else
+    {
+        LOG_WARNING("schema::setup cannot parse runtime schema because schema system interface is null");
+    }
+
+    LOG_DEBUG("schema::setup runtime scope summary processed='%u' null='%u' unnamed='%u' non_target='%u' empty_hash='%u'",
+        processed_scopes,
+        skipped_null_scopes,
+        skipped_unnamed_scopes,
+        skipped_non_target_scopes,
+        skipped_empty_hash_tables);
 
     if (!runtime_entries.empty())
         save_runtime_cache(runtime_entries);
@@ -358,9 +403,13 @@ bool schema::setup()
 
     if (cached_offsets_loaded)
         LOG_INFO("loaded '%d' schema offsets from runtime cache", cached_offsets_loaded);
+    else
+        LOG_DEBUG("schema::setup runtime cache did not provide offsets");
 
     if (dump_offsets_loaded)
         LOG_INFO("loaded '%d' schema offsets from dump files", dump_offsets_loaded);
+    else
+        LOG_DEBUG("schema::setup dump files did not provide additional offsets");
 
     uint32_t fallback_added = 0;
     for (const auto& fallback_entry : m_schema_fallback_data)

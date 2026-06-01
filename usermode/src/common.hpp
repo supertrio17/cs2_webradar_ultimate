@@ -28,7 +28,16 @@ namespace offsets
     { \
         FILE* log = fopen("WR_Log.txt", "a+"); \
         if (log) { \
-            fprintf(log, "[INFO] " str "\n", __VA_ARGS__); \
+            fprintf(log, "[INFO] " str "\n" __VA_OPT__(,) __VA_ARGS__); \
+            fclose(log); \
+        } \
+    }
+
+#define LOG_DEBUG(str, ...) \
+    { \
+        FILE* log = fopen("WR_Log.txt", "a+"); \
+        if (log) { \
+            fprintf(log, "[DEBUG] " str "\n" __VA_OPT__(,) __VA_ARGS__); \
             fclose(log); \
         } \
     }
@@ -37,8 +46,8 @@ namespace offsets
     { \
         FILE* log = fopen("WR_Log.txt", "a+"); \
         if (log) { \
-        fprintf(log, "[WARNING] " str "\n", __VA_ARGS__); \
-        fclose(log); \
+            fprintf(log, "[WARNING] " str "\n" __VA_OPT__(,) __VA_ARGS__); \
+            fclose(log); \
         } \
     }
 
@@ -47,8 +56,8 @@ namespace offsets
         const auto filename = std::filesystem::path(__FILE__).filename().string(); \
         FILE* log = fopen("WR_Log.txt", "a+"); \
         if (log) { \
-        fprintf(log, "[ERROR] [%s:%d] " str "\n", filename.c_str(), __LINE__, __VA_ARGS__); \
-        fclose(log); \
+            fprintf(log, "[ERROR] [%s:%d] " str "\n", filename.c_str(), __LINE__ __VA_OPT__(,) __VA_ARGS__); \
+            fclose(log); \
         } \
     }
 
