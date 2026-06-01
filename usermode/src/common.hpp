@@ -23,49 +23,46 @@ namespace offsets
     inline constexpr uintptr_t m_schema_system = 0x76800;
 }
 
-/* custom defines */
-#define LOG_INFO(str, ...) \
-    { \
-        FILE* log = fopen("WR_Log.txt", "a+"); \
-        if (log) { \
-            fprintf(log, "[INFO] " str "\n" __VA_OPT__(,) __VA_ARGS__); \
-            fclose(log); \
-        } \
+namespace log_detail
+{
+    template<typename... t_args>
+    inline void write(const char* level, const char* format, t_args... args)
+    {
+        FILE* log = fopen("WR_Log.txt", "a+");
+        if (!log)
+            return;
+
+        fprintf(log, "[%s] ", level);
+        fprintf(log, format, args...);
+        fprintf(log, "\n");
+        fclose(log);
     }
 
-#define LOG_DEBUG(str, ...) \
-    { \
-        FILE* log = fopen("WR_Log.txt", "a+"); \
-        if (log) { \
-            fprintf(log, "[DEBUG] " str "\n" __VA_OPT__(,) __VA_ARGS__); \
-            fclose(log); \
-        } \
+    template<typename... t_args>
+    inline void write_error(const char* file, const int line, const char* format, t_args... args)
+    {
+        const auto filename = std::filesystem::path(file).filename().string();
+
+        FILE* log = fopen("WR_Log.txt", "a+");
+        if (!log)
+            return;
+
+        fprintf(log, "[ERROR] [%s:%d] ", filename.c_str(), line);
+        fprintf(log, format, args...);
+        fprintf(log, "\n");
+        fclose(log);
     }
 
-#define LOG_WARNING(str, ...) \
-    { \
-        FILE* log = fopen("WR_Log.txt", "a+"); \
-        if (log) { \
-            fprintf(log, "[WARNING] " str "\n" __VA_OPT__(,) __VA_ARGS__); \
-            fclose(log); \
-        } \
+    inline void clear()
+    {
+        FILE* log = fopen("WR_Log.txt", "w+");
+        if (log)
+            fclose(log);
     }
+}
 
-#define LOG_ERROR(str, ...) \
-    { \
-        const auto filename = std::filesystem::path(__FILE__).filename().string(); \
-        FILE* log = fopen("WR_Log.txt", "a+"); \
-        if (log) { \
-            fprintf(log, "[ERROR] [%s:%d] " str "\n", filename.c_str(), __LINE__ __VA_OPT__(,) __VA_ARGS__); \
-            fclose(log); \
-        } \
-    }
-
-#define LOG_CLEAR() \
-    { \
-        FILE* log = fopen("WR_Log.txt", "w+"); \
-        if (log) { \
-            fclose(log); \
-        } \
-    }
-    
+#define LOG_INFO(...) log_detail::write("INFO", __VA_ARGS__)
+#define LOG_DEBUG(...) log_detail::write("DEBUG", __VA_ARGS__)
+#define LOG_WARNING(...) log_detail::write("WARNING", __VA_ARGS__)
+#define LOG_ERROR(...) log_detail::write_error(__FILE__, __LINE__, __VA_ARGS__)
+#define LOG_CLEAR() log_detail::clear()
